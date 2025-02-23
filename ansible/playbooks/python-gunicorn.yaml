@@ -1,0 +1,66 @@
+- name: Install and Configure Django + Gunicorn
+  hosts: localhost
+
+  vars:
+    app_user: ubuntu
+    django_app_dir: /opt/app
+
+  tasks:
+    - name: Install Django & Dependencies
+      apt:
+        name:
+          - python3-pip
+          - python3-venv
+          - python3-dev
+          - libpq-dev
+        state: present
+
+    - name: Create Django App Directory
+      file:
+        path: "{{ django_app_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: 0755
+
+    - name: Copy Django Application
+      copy:
+        src: ./app/
+        dest: "{{ django_app_dir }}"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+
+    - name: Install Python Dependencies
+      pip:
+        requirements: "{{ django_app_dir }}/requirements.txt"
+        virtualenv: "{{ django_app_dir }}/venv"
+
+    - name: Setup Gunicorn Service
+      copy:
+        dest: /etc/systemd/system/gunicorn.service
+        content: |
+          [Unit]
+          Description=Gunicorn instance to serve Django
+          After=network.target
+
+          [Service]
+          User={{ app_user }}
+          Group={{ app_user }}
+          WorkingDirectory={{ django_app_dir }}
+          ExecStart={{ django_app_dir }}/venv/bin/gunicorn --workers 3 --bind 0.0.0.0:8000 myapp.wsgi:application
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart Gunicorn
+
+    - name: Start & Enable Gunicorn
+      systemd:
+        name: gunicorn
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: Restart Gunicorn
+      systemd:
+        name: gunicorn
+        state: restarted

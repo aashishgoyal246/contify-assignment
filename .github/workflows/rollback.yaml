@@ -1,0 +1,75 @@
+name: Route 53 Rollback
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+
+    env:
+      HOSTED_ZONE_ID: "Z123456789ABCDEF"  # Need to be changed with your Route 53 hosted zone ID
+      DOMAIN_NAME: "app.test.com"
+      BLUE_ENV: "blue.test.com"
+      GREEN_ENV: "green.test.com"
+      AWS_REGION: "us-east-1"
+
+    steps:
+      - name: Configure AWS CLI
+        run: aws configure set region $AWS_REGION
+
+      - name: Determine Current Live Environment
+        id: get_live_env
+        run: |
+          CURRENT_LIVE=$(aws route53 list-resource-record-sets --hosted-zone-id $HOSTED_ZONE_ID \
+            --query "ResourceRecordSets[?Name == '${DOMAIN_NAME}.'].{Weight:Weight,Value:ResourceRecords[0].Value}" --output json | jq -r '.[] | select(.Weight==100) | .Value')
+
+          if [ "$CURRENT_LIVE" == "$GREEN_ENV" ]; then
+            echo "ROLLBACK_TARGET=$BLUE_ENV" >> $GITHUB_ENV
+          else
+            echo "ROLLBACK_TARGET=$GREEN_ENV" >> $GITHUB_ENV
+          fi
+
+      - name: Rollback Route 53 Traffic to Previous Environment
+        run: |
+          if [ "${{ env.ROLLBACK_TARGET }}" == "$BLUE_ENV" ]; then
+            PRIMARY_WEIGHT=100
+            SECONDARY_WEIGHT=0
+          else
+            PRIMARY_WEIGHT=0
+            SECONDARY_WEIGHT=100
+          fi
+
+          cat << EOF > /tmp/route53-rollback.json
+          {
+            "Changes": [
+              {
+                "Action": "UPSERT",
+                "ResourceRecordSet": {
+                  "Name": "${DOMAIN_NAME}",
+                  "Type": "A",
+                  "SetIdentifier": "Blue",
+                  "Weight": $PRIMARY_WEIGHT,
+                  "TTL": 60,
+                  "ResourceRecords": [{ "Value": "$BLUE_ENV" }]
+                }
+              },
+              {
+                "Action": "UPSERT",
+                "ResourceRecordSet": {
+                  "Name": "${DOMAIN_NAME}",
+                  "Type": "A",
+                  "SetIdentifier": "Green",
+                  "Weight": $SECONDARY_WEIGHT,
+                  "TTL": 60,
+                  "ResourceRecords": [{ "Value": "$GREEN_ENV" }]
+                }
+              }
+            ]
+          }
+          EOF
+
+          aws route53 change-resource-record-sets --hosted-zone-id $HOSTED_ZONE_ID \
+            --change-batch file:///tmp/route53-rollback.json
+
+          echo "Rolled back traffic to ${{ env.ROLLBACK_TARGET }}"

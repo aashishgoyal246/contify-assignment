@@ -1,0 +1,55 @@
+- name: Install and Configure PostgreSQL
+  hosts: localhost
+
+  vars:
+    db_name: django_db
+    db_user: django_user
+    db_password: django_password
+
+  tasks:
+    - name: Install PostgreSQL
+      apt:
+        name: postgresql
+        state: present
+
+    - name: Start & Enable PostgreSQL
+      service:
+        name: postgresql
+        state: started
+        enabled: yes
+
+    - name: Create Database User
+      become_user: postgres
+      postgresql_user:
+        name: "{{ db_user }}"
+        password: "{{ db_password }}"
+        role_attr_flags: CREATEDB
+
+    - name: Create Database
+      become_user: postgres
+      postgresql_db:
+        name: "{{ db_name }}"
+        owner: "{{ db_user }}"
+
+    - name: Secure PostgreSQL Configuration
+      copy:
+        dest: /etc/postgresql/14/main/postgresql.conf
+        content: |
+          listen_addresses = '*'
+          max_connections = 100
+      notify: Restart PostgreSQL
+
+    - name: Configure PostgreSQL Authentication
+      copy:
+        dest: /etc/postgresql/14/main/pg_hba.conf
+        content: |
+          local   all             postgres                               peer
+          host    all             all             127.0.0.1/32           md5
+          host    all             all             ::1/128                md5
+      notify: Restart PostgreSQL
+
+  handlers:
+    - name: Restart PostgreSQL
+      service:
+        name: postgresql
+        state: restarted

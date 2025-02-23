@@ -1,0 +1,103 @@
+name: Blue-Green Deployment with Route 53
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      HOSTED_ZONE_ID: "Z123456789ABCDEF"  # Need to be changed with your Route 53 hosted zone ID
+      DOMAIN_NAME: "app.example.com"
+      BLUE_ENV: "blue.example.com"
+      GREEN_ENV: "green.example.com"
+      AWS_REGION: "us-east-1"
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Tests Cases
+        run: pytest
+
+      - name: Determine Target Environment
+        id: get_target_env
+        run: |
+          CURRENT_LIVE=$(aws route53 list-resource-record-sets --hosted-zone-id $HOSTED_ZONE_ID \
+            --query "ResourceRecordSets[?Name == '${DOMAIN_NAME}.'].{Weight:Weight,Value:ResourceRecords[0].Value}" --output json | jq -r '.[] | select(.Weight==100) | .Value')
+
+          if [ "$CURRENT_LIVE" == "$BLUE_ENV" ]; then
+            echo "TARGET=$GREEN_ENV" >> $GITHUB_ENV
+          else
+            echo "TARGET=$BLUE_ENV" >> $GITHUB_ENV
+          fi
+
+      - name: Deploy to Target Environment
+        run: |
+          ssh -o StrictHostKeyChecking=no -i <(echo "$SSH_PRIVATE_KEY") ubuntu@${{ env.TARGET }} "
+          cd /opt/app
+          git pull
+          systemctl restart gunicorn
+          "
+
+      - name: Health Check
+        run: |
+          HEALTH_STATUS=$(curl -s http://${{ env.TARGET }}/health)
+          if [ "$HEALTH_STATUS" != "OK" ]; then
+            echo "Health check failed! Rolling back..."
+            exit 1
+          fi
+
+      - name: Update Route 53 to Switch Traffic
+        run: |
+          if [ "${{ env.TARGET }}" == "$GREEN_ENV" ]; then
+            PRIMARY_WEIGHT=0
+            SECONDARY_WEIGHT=100
+          else
+            PRIMARY_WEIGHT=100
+            SECONDARY_WEIGHT=0
+          fi
+
+          # Update Route 53 to shift traffic
+          cat << EOF > /tmp/route53-change.json
+          {
+            "Changes": [
+              {
+                "Action": "UPSERT",
+                "ResourceRecordSet": {
+                  "Name": "${DOMAIN_NAME}",
+                  "Type": "A",
+                  "SetIdentifier": "Blue",
+                  "Weight": $PRIMARY_WEIGHT,
+                  "TTL": 60,
+                  "ResourceRecords": [{ "Value": "$BLUE_ENV" }]
+                }
+              },
+              {
+                "Action": "UPSERT",
+                "ResourceRecordSet": {
+                  "Name": "${DOMAIN_NAME}",
+                  "Type": "A",
+                  "SetIdentifier": "Green",
+                  "Weight": $SECONDARY_WEIGHT,
+                  "TTL": 60,
+                  "ResourceRecords": [{ "Value": "$GREEN_ENV" }]
+                }
+              }
+            ]
+          }
+          EOF
+
+          aws route53 change-resource-record-sets --hosted-zone-id $HOSTED_ZONE_ID \
+            --change-batch file:///tmp/route53-change.json
+
+          echo "Traffic switched to ${{ env.TARGET }}"

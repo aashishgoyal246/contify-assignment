@@ -1,0 +1,19 @@
+- name: Configure Log Rotation for System & Application Logs
+  hosts: localhost
+
+  vars:
+    django_app_dir: /opt/app
+
+  tasks:
+    - name: Configure Log Rotation for Django & System Logs
+      copy:
+        dest: /etc/logrotate.d/app
+        content: |
+          {{ django_app_dir }}/logs/*.log {
+              weekly
+              rotate 4
+              compress
+              missingok
+              notifempty
+              copytruncate
+          }
